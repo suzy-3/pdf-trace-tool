@@ -1,18 +1,18 @@
 [
   {
     "case": "640x500",
-    "seconds": 0.074,
-    "paths": 23,
+    "seconds": 0.094,
+    "paths": 31,
     "missing_pixels": 3448,
     "added_pixels": 0,
-    "process_peak_rss_mib": 166.6
+    "process_peak_rss_mib": 161.8
   },
   {
     "case": "2000x1500",
-    "seconds": 1.28,
-    "paths": 23,
+    "seconds": 1.183,
+    "paths": 55,
     "missing_pixels": 37630,
     "added_pixels": 78,
-    "process_peak_rss_mib": 261.2
+    "process_peak_rss_mib": 193.3
   }
 ]

@@ -137,7 +137,7 @@ def test_cad_output_scale_in_pdf_points():
         assert result['width'] / scale == 220
 
 
-def test_cad_resource_limit():
+def test_cad_thinning_convergence_budget():
     from app.main import store
     token = upload()
     image = np.zeros((1000, 1000), np.uint8)
@@ -146,6 +146,7 @@ def test_cad_resource_limit():
         store[token]['pdf'] = doc.tobytes()
     response = client.post(f'/api/documents/{token}/pages/1/process', json={'mode':'cad_clean', 'deskew':False})
     assert response.status_code == 413
+    assert '収束' in response.json()['detail']
     client.delete(f'/api/documents/{token}')
 
 

@@ -108,33 +108,140 @@ def original(token: str, page: int):
     return Response(result, media_type='image/png')
 
 
+# One heavy operation at a time; progress never waits on the image-work lock.
+processing_slot = threading.BoundedSemaphore(1)
+BINARY_FIELDS = {'png', 'svg', 'reference', 'difference', 'page_size', '_stored_at'}
+RESULT_CACHE_BYTES = 128 * 1024 * 1024
+
+
+def summary(output):
+    return {k: v for k, v in output.items() if k not in BINARY_FIELDS}
+
+
+def publish(item, page, output):
+    """Called under lock. Bound retained output buffers across all pages/docs."""
+    def weight(value):
+        return sum(len(v) for v in value.values() if isinstance(v, bytes))
+    required = weight(output)
+    if required > RESULT_CACHE_BYTES:
+        raise CadLimitError('出力の保存容量が128MBを超えます。ページを分割してください。')
+    entries = [(value.get('_stored_at', 0), results, key, weight(value))
+               for document_item in store.values()
+               for results in [document_item['results']] for key, value in results.items()]
+    used = sum(entry[3] for entry in entries)
+    for _, results, key, size in sorted(entries, key=lambda entry: entry[0]):
+        if used + required <= RESULT_CACHE_BYTES:
+            break
+        del results[key]
+        used -= size
+    output['_stored_at'] = time.monotonic()
+    item['results'][page] = output
+
+
+def compute(item, page, options, progress=None):
+    if progress:
+        progress('ページを読み込み', 0, 0, 1)
+    source = page_image(item, page)
+    if options.mode == 'cad_clean':
+        with pymupdf.open(stream=item['pdf'], filetype='pdf') as doc:
+            rect = doc[page-1].rect
+        scale = min(2.0, (MAX_PIXELS/max(1, rect.width*rect.height))**0.5)
+        output = cad_clean(source, deskew=options.deskew, scale=scale, progress=progress,
+                           **{k: getattr(options, k) for k in
+                              ('line_width', 'noise_strength', 'join_threshold', 'snap', 'fidelity')})
+        output['mode'] = 'cad_clean'
+        output['page_size'] = (output['width']/scale, output['height']/scale)
+        return output
+    image, angle = clean(source, deskew=options.deskew, denoise=options.denoise,
+                         sharpen=options.sharpen, min_area=options.min_area)
+    return dict(png=png(image), svg=to_svg(image), angle=round(angle, 2),
+                width=image.shape[1], height=image.shape[0])
+
+
+def processing_error(exc):
+    if isinstance(exc, HTTPException):
+        return exc.status_code, str(exc.detail)
+    if isinstance(exc, CadLimitError):
+        return 413, str(exc)
+    if isinstance(exc, MemoryError):
+        return 503, '処理用メモリが不足しました。他の図面を閉じて再実行してください。'
+    if isinstance(exc, OSError):
+        return 503, '一時ファイルの保存に失敗しました。ディスク容量または保存先の権限を確認してください。'
+    return 500, '図面の処理に失敗しました。PDFが正常に開けることを確認し、設定を変更して再実行してください。'
+
+
 @app.post('/api/documents/{token}/pages/{page}/process')
 def process(token: str, page: int, options: Options):
-    with lock:
-        item = document(token)
-        source = page_image(item, page)
-        if options.mode == 'cad_clean':
-            with pymupdf.open(stream=item['pdf'], filetype='pdf') as doc:
-                rect = doc[page - 1].rect
-            scale = min(2.0, (MAX_PIXELS / max(1, rect.width * rect.height)) ** 0.5)
-            # The Python skeleton graph needs substantially more memory than a raster.
-            if source.size > 3_000_000:
-                raise HTTPException(413, 'CAD清書は300万画素以下です。ページを分割してください。')
+    if not processing_slot.acquire(blocking=False):
+        raise HTTPException(409, '別の図面を処理中です。完了後に再実行してください。')
+    try:
+        with lock:
+            item = document(token)
+            item['results'].pop(page, None)
+        output = compute(item, page, options)
+        with lock:
+            if store.get(token) is item:
+                publish(item, page, output)
+        return summary(output)
+    except Exception as exc:
+        code, message = processing_error(exc)
+        raise HTTPException(code, message) from exc
+    finally:
+        processing_slot.release()
+
+
+@app.post('/api/documents/{token}/pages/{page}/jobs', status_code=202)
+def start_job(token: str, page: int, options: Options):
+    if not processing_slot.acquire(blocking=False):
+        raise HTTPException(409, '別の図面を処理中です。完了後に再実行してください。')
+    try:
+        with lock:
+            item = document(token)
+            if not 1 <= page <= item['pages']:
+                raise HTTPException(404, 'ページが存在しません。')
+            job_id = secrets.token_urlsafe(24)
+            job = dict(id=job_id, page=page, state='running', stage='開始待ち',
+                       percent=0, completed=0, total=1)
+            # Keep only the latest job per document, not an unbounded history.
+            item['job'] = job
+            item['results'].pop(page, None)
+        def report(stage, percent, completed, total):
+            with lock:
+                if store.get(token) is not item:
+                    raise HTTPException(404, '図面が削除されたため処理を中止しました。')
+                job.update(stage=stage, percent=max(job['percent'], min(99, int(percent))),
+                           completed=completed, total=total)
+        def run():
             try:
-                output = cad_clean(source, deskew=options.deskew, scale=scale,
-                                   **{k: getattr(options, k) for k in
-                                      ('line_width', 'noise_strength', 'join_threshold', 'snap', 'fidelity')})
-            except CadLimitError as exc:
-                raise HTTPException(413, str(exc)) from exc
-            output['mode'] = 'cad_clean'
-            output['page_size'] = (output['width']/scale, output['height']/scale)
-            item['results'][page] = output
-            return {k: v for k, v in output.items() if k not in
-                    ('png', 'svg', 'reference', 'difference', 'page_size')}
-        image, angle = clean(source, deskew=options.deskew, denoise=options.denoise,
-                             sharpen=options.sharpen, min_area=options.min_area)
-        item['results'][page] = {'png': png(image), 'svg': to_svg(image)}
-    return {'angle': round(angle, 2), 'width': image.shape[1], 'height': image.shape[0]}
+                output = compute(item, page, options, report)
+                with lock:
+                    if store.get(token) is item:
+                        publish(item, page, output)
+                        job.update(state='done', percent=100, stage='完了', result=summary(output))
+            except Exception as exc:
+                code, message = processing_error(exc)
+                with lock:
+                    job.update(state='failed', stage='処理失敗', error=message, error_code=code)
+            finally:
+                processing_slot.release()
+        threading.Thread(target=run, name='pdf-cleanup', daemon=True).start()
+        return dict(job)
+    except Exception as exc:
+        processing_slot.release()
+        code, message = processing_error(exc)
+        with lock:
+            if 'job' in locals():
+                job.update(state='failed', stage='処理失敗', error=message, error_code=code)
+        raise HTTPException(code, message) from exc
+
+
+@app.get('/api/documents/{token}/pages/{page}/jobs/{job_id}')
+def job_status(token: str, page: int, job_id: str):
+    with lock:
+        job = document(token).get('job')
+        if not job or job['id'] != job_id or job['page'] != page:
+            raise HTTPException(404, '処理状況が見つかりません。再変換してください。')
+        return dict(job)
 
 
 @app.get('/api/documents/{token}/pages/{page}/{kind}')
