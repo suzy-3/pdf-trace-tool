@@ -31,44 +31,18 @@ def decoded(output):
     return cv2.imdecode(np.frombuffer(output['png'], np.uint8), 0)
 
 
-def svg_points(output):
-    root = ET.fromstring(output['svg'])
-    path = root.find('{http://www.w3.org/2000/svg}path')
-    assert path.attrib['fill'] == 'none'
-    assert path.attrib['stroke'] == 'black'
-    return path.attrib
-
-
 def test_geometry_and_no_invented_centerlines():
     original = plan()
     result = cad_clean(original, deskew=False)
     image = decoded(result)
-    attrs = svg_points(result)
-    assert float(attrs['stroke-width']) == 1.0
-    # Test strokes rather than relying solely on raster similarity.
-    assert attrs['d'].count('M') > 10
-    for y in (40, 75, 110, 117, 150, 370):
-        assert (image[y-1:y+2, 40:190] < 200).any(axis=0).mean() > .98
-    assert (image[72:79, 40:190] < 200).sum(axis=0).max() <= 2
-    for x in (202, 402):
-        assert np.all(image[149:152, x] == 255)  # no inferred gap connection
-    assert image[40, 500] < 200  # intersection unchanged
-    assert (image[316:334, 30:80] < 200).sum() > 40  # glyph strokes retained
-    assert image[450, 30] < 240  # no removal of punctuation by default
-    assert result['added_pixels'] == 0
-    # Vector centers must lie on measured source ink, including every segment.
-    import re
-    centers = np.zeros(original.shape, np.uint8)
-    for subpath in attrs['d'].split('M')[1:]:
-        coords = np.array([[float(n) - .5 for n in pair.split(',')]
-                           for pair in re.findall(r'[0-9.]+,[0-9.]+', subpath)], np.int32)
-        cv2.polylines(centers, [coords], False, 1, 1)
-    assert not np.any((centers > 0) & (original >= 220))
-    # Main wall center differs by at most one pixel; thin endpoints retained.
-    ys, xs = np.nonzero(centers[70:81, 40:190])
-    assert np.max(np.abs(ys + 70 - 75)) <= 1
-    assert centers[40, 30] and centers[40, 600]
-    assert centers[110, 300] and centers[117, 300]
+    # Connected walls, glyphs and pale lines must be retained, not skeletonized.
+    assert np.array_equal(image, original)
+    assert np.count_nonzero(image[70:81, 40:190] < 200) == np.count_nonzero(original[70:81, 40:190] < 200)
+    assert result['added_pixels'] == result['missing_pixels'] == 0
+    assert result['mean_width_error_px'] == 0
+    assert result['local_connectivity_change'] == 0
+    assert result['fallback_pixel_retention'] == 1
+    assert result['review_required']
 
 
 @pytest.mark.parametrize('fidelity,snap', [('faithful', False), ('clean', False), ('clean', True)])
@@ -80,7 +54,7 @@ def test_diagonal_curve_and_gaps_preserved(fidelity, snap):
     assert result['added_pixels'] == 0
     for x, y in ((125, 230), (435, 250), (360, 310)):
         assert (out[y-2:y+3, x-2:x+3] < 200).any()
-    assert np.all(out[150, 202:204] == 255)
+    assert np.array_equal(out[150, 202:204], image[150, 202:204])
 
 
 def test_rotation_expands_canvas_and_keeps_corners():
@@ -102,10 +76,12 @@ def test_blank_loops_dots_and_noise_opt_in():
     assert np.all(decoded(cad_clean(blank, deskew=False)) == 255)
     blank[20, 20] = 0
     assert decoded(cad_clean(blank, deskew=False))[20, 20] < 240
-    assert decoded(cad_clean(blank, deskew=False, noise_strength=1))[20, 20] == 255
+    assert decoded(cad_clean(blank, deskew=False, noise_strength=1))[20, 20] == 0
+    blank[20, 30] = 180
+    assert decoded(cad_clean(blank, deskew=False, noise_strength=1))[20, 30] == 255
     cv2.circle(blank, (50, 50), 20, 0, 1)
     out = cad_clean(blank, deskew=False)
-    assert out['paths'] >= 1 and out['protected_components'] >= 1
+    assert out['review_required'] and out['thinning_iterations'] == 0
     assert len(paths_from_skeleton(thin(blank < 100))) >= 2
 
 
@@ -119,8 +95,10 @@ def test_cad_api_vector_pdf_and_reviews():
         assert client.get(base+'/'+kind).status_code == 200
     with pymupdf.open(stream=client.get(base+'/corrected.pdf').content, filetype='pdf') as doc:
         assert doc[0].rect == pymupdf.Rect(0, 0, 250, 200)
-        assert doc[0].get_images() == []
-        assert doc[0].get_drawings()  # actual vector strokes
+        assert doc[0].get_images()  # walls/curves retain source pixels
+        pix = doc[0].get_pixmap(matrix=pymupdf.Matrix(2, 2), colorspace=pymupdf.csGRAY)
+        original = cv2.imdecode(np.frombuffer(client.get(base+'/original.png').content, np.uint8), 0)
+        assert np.array_equal(np.frombuffer(pix.samples, np.uint8).reshape(400,500) < 200, original < 200)
     assert client.post(base+'/process', json={'mode': 'unknown'}).status_code == 422
     assert client.post(base+'/process', json={'line_width': -1}).status_code == 422
     assert client.post(base+'/process', json={'join_threshold': 2}).status_code == 422
@@ -128,25 +106,32 @@ def test_cad_api_vector_pdf_and_reviews():
 
 
 def test_cad_output_scale_in_pdf_points():
-    image = np.full((120, 220), 255, np.uint8)
-    image[60, 20:200] = 0
+    image = np.full((180, 300), 255, np.uint8)
+    cv2.rectangle(image, (20, 60), (280, 70), 0, -1)
     for scale in (1, 2):
         raster = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
-        result = cad_clean(raster, deskew=False, scale=scale)
-        assert float(svg_points(result)['stroke-width']) / scale == .5
-        assert result['width'] / scale == 220
+        result = cad_clean(raster, deskew=False, scale=scale, line_width=.1)
+        root = ET.fromstring(result['svg'])
+        paths = root.findall('.//{http://www.w3.org/2000/svg}path')
+        assert paths  # measured 11pt source width, not the old .1pt override
+        assert float(paths[0].attrib['stroke-width'])/scale == pytest.approx(11, abs=.05)
+        assert result['width']/scale == 300
+        assert np.array_equal(decoded(result) < 200, raster < 200)
 
 
-def test_cad_thinning_convergence_budget():
+def test_solid_wall_is_preserved_without_thinning_or_convergence_error():
     from app.main import store
     token = upload()
     image = np.zeros((1000, 1000), np.uint8)
     with pymupdf.open() as doc:
         doc.new_page(width=500, height=500).insert_image(pymupdf.Rect(0, 0, 500, 500), stream=png(image))
         store[token]['pdf'] = doc.tobytes()
-    response = client.post(f'/api/documents/{token}/pages/1/process', json={'mode':'cad_clean', 'deskew':False})
-    assert response.status_code == 413
-    assert '収束' in response.json()['detail']
+    base = f'/api/documents/{token}/pages/1'
+    response = client.post(base+'/process', json={'mode':'cad_clean', 'deskew':False})
+    assert response.status_code == 200
+    assert response.json()['thinning_iterations'] == 0
+    actual = cv2.imdecode(np.frombuffer(client.get(base+'/corrected.png').content, np.uint8), 0)
+    assert np.array_equal(actual, image)
     client.delete(f'/api/documents/{token}')
 
 

@@ -98,15 +98,15 @@ def test_large_floor_plan_job_and_vector_exports():
     assert metrics['foreground_pixels'] > 300_000 and metrics['tiles'] > 20
     assert metrics['width'] == 2400 and metrics['height'] == 1600
     root = ET.fromstring(client.get(base+'/trace.svg').content)
-    path = root.find('{http://www.w3.org/2000/svg}path')
-    assert path.attrib['stroke-width'] == '1.000'
-    assert path.attrib['fill'] == 'none'
+    assert root.find('{http://www.w3.org/2000/svg}image') is not None
+    assert metrics['mean_width_error_px'] == 0
+    assert metrics['fallback_pixel_retention'] == 1
     corrected = cv2.imdecode(np.frombuffer(client.get(base+'/corrected.png').content, np.uint8), 0)
     # Horizontal dimension line crosses every seam, including real intersections.
     assert np.all(corrected[30, 25:2375] < 240)
     with pymupdf.open(stream=client.get(base+'/corrected.pdf').content, filetype='pdf') as doc:
         assert doc[0].rect == pymupdf.Rect(0, 0, 1200, 800)
-        assert doc[0].get_drawings()
+        assert doc[0].get_images()
     client.delete(f'/api/documents/{token}')
 
 
@@ -163,7 +163,8 @@ def test_large_drawing_peak_memory_and_bounded_graph():
     assert measurements['foreground_pixels'] > 300_000
     assert measurements['pixels'] > 10_000_000
     assert measurements['peak_rss_mib'] < 650
-    assert measurements['max_graph_pixels'] <= (TILE_SIZE+4)**2
+    assert measurements['max_graph_pixels'] == 0
+    assert measurements['max_analysis_pixels'] <= (TILE_SIZE+166)**2
 
 
 def test_result_cache_budget_evicts_old_outputs(monkeypatch):
@@ -213,7 +214,8 @@ def test_workspaces_are_deleted_on_success_and_failure(monkeypatch, tmp_path):
     assert list(tmp_path.iterdir()) == []
     def fail(*args):
         raise RuntimeError('test failure')
-    monkeypatch.setattr(cad, 'paths_from_skeleton', fail)
+    import app.hybrid as hybrid
+    monkeypatch.setattr(hybrid, 'image_tag', fail)
     with pytest.raises(RuntimeError):
         cad.cad_clean(gray, deskew=False)
     assert list(tmp_path.iterdir()) == []

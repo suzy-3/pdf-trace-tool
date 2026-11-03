@@ -110,7 +110,7 @@ def original(token: str, page: int):
 
 # One heavy operation at a time; progress never waits on the image-work lock.
 processing_slot = threading.BoundedSemaphore(1)
-BINARY_FIELDS = {'png', 'svg', 'reference', 'difference', 'page_size', '_stored_at'}
+BINARY_FIELDS = {'png', 'svg', 'reference', 'difference', 'review', 'page_size', '_stored_at'}
 RESULT_CACHE_BYTES = 128 * 1024 * 1024
 
 
@@ -246,14 +246,23 @@ def job_status(token: str, page: int, job_id: str):
 
 @app.get('/api/documents/{token}/pages/{page}/{kind}')
 def result(token: str, page: int, kind: str):
-    if kind not in ('corrected.png', 'trace.svg', 'corrected.pdf', 'reference.png', 'difference.png'):
+    if kind not in ('corrected.png', 'trace.svg', 'corrected.pdf', 'reference.png', 'difference.png', 'review.png', 'preserved.pdf'):
         raise HTTPException(404, '出力形式が存在しません。')
     with lock:
         item = document(token)
+        if kind == 'preserved.pdf':
+            with pymupdf.open(stream=item['pdf'], filetype='pdf') as source, pymupdf.open() as pdf:
+                if not 1 <= page <= len(source):
+                    raise HTTPException(404, 'ページが存在しません。')
+                pdf.insert_pdf(source, from_page=page-1, to_page=page-1)
+                data = pdf.tobytes(deflate=True)
+            return Response(data, media_type='application/pdf', headers={
+                'Content-Disposition': f'attachment; filename="page-{page}-preserved.pdf"',
+                'Cache-Control': 'no-store'})
         if page not in item['results']:
             raise HTTPException(409, '先にこのページを補正してください。')
         output = item['results'][page]
-        if kind in ('reference.png', 'difference.png'):
+        if kind in ('reference.png', 'difference.png', 'review.png'):
             key = kind.split('.')[0]
             if key not in output:
                 raise HTTPException(409, '重ね合わせ・差分はCAD清書モードで実行してください。')

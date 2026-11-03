@@ -1,7 +1,6 @@
 """Separate process for meaningful peak RSS; synthetic near-A0 raster."""
 import json
 from pathlib import Path
-import resource
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import app.cad as cad
@@ -18,10 +17,17 @@ def main():
         return original(mask)
     cad.paths_from_skeleton = traced
     output = cad.cad_clean(raster, deskew=False)
+    if sys.platform == 'win32':
+        import psutil
+        peak = psutil.Process().memory_info().peak_wset/1024**2
+    else:
+        import resource
+        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024
     print(json.dumps(dict(pixels=raster.size, foreground_pixels=output['foreground_pixels'],
                           tiles=output['tiles'], seconds=output['seconds'],
-                          max_graph_pixels=max_graph_pixels,
-                          peak_rss_mib=round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024, 1))))
+                          max_graph_pixels=max_graph_pixels, max_analysis_pixels=output['max_analysis_pixels'],
+                          missing_ratio=output['missing_ratio'], mean_width_error_px=output['mean_width_error_px'],
+                          peak_rss_mib=round(peak, 1))))
 
 
 if __name__ == '__main__':

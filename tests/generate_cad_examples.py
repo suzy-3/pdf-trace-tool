@@ -1,7 +1,6 @@
 """Reproduce synthetic review images and process peak-RSS measurements."""
 import json
 from pathlib import Path
-import resource
 import sys
 import cv2
 import numpy as np
@@ -24,7 +23,7 @@ def main():
     (target/'cad-clean.svg').write_bytes(result['svg'])
     (target/'difference.png').write_bytes(result['difference'])
     panels = []
-    for name, data in [('Original', image), ('Legacy', legacy), ('CAD centerlines', cv2.imdecode(np.frombuffer(result['png'], np.uint8), 0))]:
+    for name, data in [('Original', image), ('Legacy', legacy), ('CAD hybrid preserve', cv2.imdecode(np.frombuffer(result['png'], np.uint8), 0))]:
         panel = cv2.copyMakeBorder(data, 30, 0, 0, 0, cv2.BORDER_CONSTANT, value=255)
         cv2.putText(panel, name, (10, 22), cv2.FONT_HERSHEY_SIMPLEX, .6, 0, 1)
         panels.append(panel)
@@ -34,7 +33,7 @@ def main():
         result = cad_clean(raster, deskew=False, scale=raster.shape[1]/320)
         rows.append(dict(case=label, seconds=result['seconds'], paths=result['paths'],
                          missing_pixels=result['missing_pixels'], added_pixels=result['added_pixels'],
-                         process_peak_rss_mib=round(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024, 1)))
+                         missing_ratio=result['missing_ratio'], mean_width_error_px=result['mean_width_error_px']))
     (target/'measurements.json').write_text(json.dumps(rows, indent=2)+'\n')
     print(json.dumps(rows, indent=2))
 
