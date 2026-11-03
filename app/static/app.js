@@ -4,9 +4,11 @@ const base = () => `/api/documents/${token}/pages/${$('page').value}`;
 function status(text) { $('status').textContent = text; }
 function setBusy(value) {
   busy = value;
+  for (const id of ['mode', 'line-width', 'noise-strength', 'join-threshold', 'snap', 'fidelity', 'deskew', 'denoise', 'sharpen', 'area']) $(id).disabled = value;
   for (const id of ['file', 'page', 'process', 'close']) $(id).disabled = value || (id !== 'file' && !token);
 }
 function resetOutput() {
+  $('review').hidden = true;
   $('corrected').hidden = true;
   $('empty-corrected').hidden = false;
   for (const id of ['pdf', 'svg']) {
@@ -45,14 +47,21 @@ $('page').onchange = showPage;
 $('process').onclick = async () => {
   setBusy(true); resetOutput(); status('図面を補正して線を抽出しています…');
   try {
-    const data = await (await request(`${base()}/process`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({deskew: $('deskew').checked, denoise: $('denoise').checked, sharpen: $('sharpen').checked, min_area: Number($('area').value)})})).json();
+    const data = await (await request(`${base()}/process`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({mode: $('mode').value, line_width: Number($('line-width').value), noise_strength: Number($('noise-strength').value), join_threshold: Number($('join-threshold').value), snap: $('snap').checked, fidelity: $('fidelity').value, deskew: $('deskew').checked, denoise: $('denoise').checked, sharpen: $('sharpen').checked, min_area: Number($('area').value)})})).json();
     $('corrected').src = `${base()}/corrected.png?t=${Date.now()}`;
     $('corrected').hidden = false; $('empty-corrected').hidden = true;
     for (const [id, name] of [['pdf', 'corrected.pdf'], ['svg', 'trace.svg']]) {
       $(id).href = `${base()}/${name}`; $(id).download = `page-${$('page').value}.${id}`;
       $(id).classList.remove('disabled'); $(id).setAttribute('aria-disabled', 'false');
     }
-    status(`変換しました。検出した傾き: ${data.angle}° ／ ${data.width} × ${data.height} px`);
+    if (data.mode === 'cad_clean') {
+      const stamp = Date.now();
+      $('reference').src = `${base()}/reference.png?t=${stamp}`;
+      $('overlay').src = `${base()}/corrected.png?t=${stamp}`;
+      $('difference').src = `${base()}/difference.png?t=${stamp}`;
+      $('review').hidden = false; updateReview();
+    }
+    status(`変換しました。${data.warning || ''} ${data.seconds !== undefined ? `${data.seconds}秒 / 欠落候補 ${data.missing_pixels}px / 追加候補 ${data.added_pixels}px。` : ''}検出した傾き: ${data.angle}° ／ ${data.width} × ${data.height} px`);
   } catch (error) { status(error.message); }
   finally { setBusy(false); }
 };
@@ -65,3 +74,15 @@ $('close').onclick = async () => {
   } catch (error) { status(error.message); }
   finally { setBusy(false); }
 };
+
+function updateReview() {
+  const diff = $('review-mode').value === 'difference';
+  $('difference').hidden = !diff;
+  $('reference').hidden = diff; $('overlay').hidden = diff;
+  $('overlay').style.opacity = Number($('opacity').value) / 100;
+}
+$('opacity').oninput = updateReview;
+$('review-mode').onchange = updateReview;
+for (const id of ['mode', 'line-width', 'noise-strength', 'join-threshold', 'snap', 'fidelity', 'deskew', 'denoise', 'sharpen', 'area']) {
+  $(id).onchange = () => { resetOutput(); if (token) status('設定を変更しました。再変換してください。'); };
+}

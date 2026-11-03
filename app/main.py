@@ -1,3 +1,4 @@
+from typing import Literal
 from pathlib import Path
 import secrets
 import threading
@@ -11,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .processing import clean, png, to_svg
+from .cad import CadLimitError, cad_clean
 
 app = FastAPI(title='PDFトレースツール')
 STATIC = Path(__file__).parent / 'static'
@@ -25,6 +27,12 @@ lock = threading.RLock()
 
 
 class Options(BaseModel):
+    mode: Literal['legacy', 'cad_clean'] = 'legacy'
+    line_width: float = Field(default=0.5, ge=0.1, le=1.5)
+    noise_strength: float = Field(default=0, ge=0, le=3)
+    join_threshold: float = Field(default=0.1, ge=0, le=1)
+    snap: bool = False
+    fidelity: Literal['faithful', 'clean'] = 'faithful'
     deskew: bool = True
     denoise: bool = True
     sharpen: bool = True
@@ -104,21 +112,56 @@ def original(token: str, page: int):
 def process(token: str, page: int, options: Options):
     with lock:
         item = document(token)
-        image, angle = clean(page_image(item, page), **options.model_dump())
+        source = page_image(item, page)
+        if options.mode == 'cad_clean':
+            with pymupdf.open(stream=item['pdf'], filetype='pdf') as doc:
+                rect = doc[page - 1].rect
+            scale = min(2.0, (MAX_PIXELS / max(1, rect.width * rect.height)) ** 0.5)
+            # The Python skeleton graph needs substantially more memory than a raster.
+            if source.size > 3_000_000:
+                raise HTTPException(413, 'CAD清書は300万画素以下です。ページを分割してください。')
+            try:
+                output = cad_clean(source, deskew=options.deskew, scale=scale,
+                                   **{k: getattr(options, k) for k in
+                                      ('line_width', 'noise_strength', 'join_threshold', 'snap', 'fidelity')})
+            except CadLimitError as exc:
+                raise HTTPException(413, str(exc)) from exc
+            output['mode'] = 'cad_clean'
+            output['page_size'] = (output['width']/scale, output['height']/scale)
+            item['results'][page] = output
+            return {k: v for k, v in output.items() if k not in
+                    ('png', 'svg', 'reference', 'difference', 'page_size')}
+        image, angle = clean(source, deskew=options.deskew, denoise=options.denoise,
+                             sharpen=options.sharpen, min_area=options.min_area)
         item['results'][page] = {'png': png(image), 'svg': to_svg(image)}
     return {'angle': round(angle, 2), 'width': image.shape[1], 'height': image.shape[0]}
 
 
 @app.get('/api/documents/{token}/pages/{page}/{kind}')
 def result(token: str, page: int, kind: str):
-    if kind not in ('corrected.png', 'trace.svg', 'corrected.pdf'):
+    if kind not in ('corrected.png', 'trace.svg', 'corrected.pdf', 'reference.png', 'difference.png'):
         raise HTTPException(404, '出力形式が存在しません。')
     with lock:
         item = document(token)
         if page not in item['results']:
             raise HTTPException(409, '先にこのページを補正してください。')
         output = item['results'][page]
-        if kind == 'corrected.pdf':
+        if kind in ('reference.png', 'difference.png'):
+            key = kind.split('.')[0]
+            if key not in output:
+                raise HTTPException(409, '重ね合わせ・差分はCAD清書モードで実行してください。')
+            return Response(output[key], media_type='image/png', headers={'Cache-Control': 'no-store'})
+        if kind == 'corrected.pdf' and output.get('mode') == 'cad_clean':
+            with pymupdf.open(stream=output['svg'], filetype='svg') as drawing:
+                vector_pdf = drawing.convert_to_pdf()
+            with pymupdf.open(stream=vector_pdf, filetype='pdf') as drawing, pymupdf.open() as pdf:
+                width, height = output['page_size']
+                target = pdf.new_page(width=width, height=height)
+                if drawing[0].get_drawings() or drawing[0].get_images():
+                    target.show_pdf_page(target.rect, drawing, 0)
+                data = pdf.tobytes(deflate=True)
+            mime = 'application/pdf'
+        elif kind == 'corrected.pdf':
             with pymupdf.open(stream=item['pdf'], filetype='pdf') as source:
                 rect = source[page - 1].rect
             with pymupdf.open() as pdf:
