@@ -4,11 +4,12 @@ const base = () => `/api/documents/${token}/pages/${$('page').value}`;
 function status(text) { $('status').textContent = text; }
 function setBusy(value) {
   busy = value;
-  for (const id of ['mode', 'line-width', 'noise-strength', 'join-threshold', 'snap', 'fidelity', 'deskew', 'denoise', 'sharpen', 'area']) $(id).disabled = value;
+  for (const id of ['mode', 'noise-strength', 'deskew', 'denoise', 'sharpen', 'area']) $(id).disabled = value;
   for (const id of ['file', 'page', 'process', 'close']) $(id).disabled = value || (id !== 'file' && !token);
 }
 function resetOutput() {
   $('review').hidden = true;
+  $('preserved').removeAttribute('href'); $('preserved').classList.add('disabled'); $('preserved').setAttribute('aria-disabled', 'true');
   $('corrected').hidden = true;
   $('empty-corrected').hidden = false;
   for (const id of ['pdf', 'svg']) {
@@ -28,6 +29,7 @@ async function request(url, options) {
 function showPage() {
   resetOutput(); $('original').hidden = false; $('empty-original').hidden = true;
   $('original').src = `${base()}/original.png`;
+  enablePreserved();
   status(`${$('page').value}ページ目を表示しています。補正・SVG変換を実行してください。`);
 }
 $('original').onerror = () => status('ページを表示できませんでした。PDFを再アップロードしてください。');
@@ -47,10 +49,10 @@ $('file').onchange = async () => {
 };
 $('page').onchange = showPage;
 $('process').onclick = async () => {
-  setBusy(true); resetOutput(); status('図面を補正して線を抽出しています…');
+  setBusy(true); resetOutput(); enablePreserved(); status('図面を補正して線を抽出しています…');
   try {
     const jobBase = base();
-    let job = await (await request(`${jobBase}/jobs`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({mode: $('mode').value, line_width: Number($('line-width').value), noise_strength: Number($('noise-strength').value), join_threshold: Number($('join-threshold').value), snap: $('snap').checked, fidelity: $('fidelity').value, deskew: $('deskew').checked, denoise: $('denoise').checked, sharpen: $('sharpen').checked, min_area: Number($('area').value)})})).json();
+    let job = await (await request(`${jobBase}/jobs`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({mode: $('mode').value, noise_strength: Number($('noise-strength').value), deskew: $('deskew').checked, denoise: $('denoise').checked, sharpen: $('sharpen').checked, min_area: Number($('area').value)})})).json();
     $('progress').hidden = false;
     while (job.state === 'running') {
       $('progress').value = job.percent;
@@ -70,10 +72,11 @@ $('process').onclick = async () => {
       const stamp = Date.now();
       $('reference').src = `${base()}/reference.png?t=${stamp}`;
       $('overlay').src = `${base()}/corrected.png?t=${stamp}`;
+      $('uncertain').src = `${base()}/review.png?t=${stamp}`;
       $('difference').src = `${base()}/difference.png?t=${stamp}`;
       $('review').hidden = false; updateReview();
     }
-    status(`変換しました。${data.warning || ''} ${data.seconds !== undefined ? `${data.seconds}秒 / 欠落候補 ${data.missing_pixels}px / 追加候補 ${data.added_pixels}px。` : ''}検出した傾き: ${data.angle}° ／ ${data.width} × ${data.height} px`);
+    status(`変換しました。${data.warning || ''} ${data.seconds !== undefined ? `${data.seconds}秒 / 原画保持 ${Math.round((data.fallback_ratio || 0) * 100)}% / 欠落候補 ${data.missing_pixels}px / 追加候補 ${data.added_pixels}px。` : ''}検出した傾き: ${data.angle}° ／ ${data.width} × ${data.height} px`);
   } catch (error) { status(error.message); }
   finally { $('progress').hidden = true; setBusy(false); }
 };
@@ -89,12 +92,27 @@ $('close').onclick = async () => {
 
 function updateReview() {
   const diff = $('review-mode').value === 'difference';
+  const uncertain = $('review-mode').value === 'uncertain';
+  $('uncertain').hidden = !uncertain;
   $('difference').hidden = !diff;
-  $('reference').hidden = diff; $('overlay').hidden = diff;
+  $('reference').hidden = diff || uncertain; $('overlay').hidden = diff || uncertain;
   $('overlay').style.opacity = Number($('opacity').value) / 100;
 }
 $('opacity').oninput = updateReview;
 $('review-mode').onchange = updateReview;
-for (const id of ['mode', 'line-width', 'noise-strength', 'join-threshold', 'snap', 'fidelity', 'deskew', 'denoise', 'sharpen', 'area']) {
-  $(id).onchange = () => { resetOutput(); if (token) status('設定を変更しました。再変換してください。'); };
+for (const id of ['mode', 'noise-strength', 'deskew', 'denoise', 'sharpen', 'area']) {
+  $(id).onchange = () => { resetOutput(); enablePreserved(); syncControls(); if (token) status('設定を変更しました。再変換してください。'); };
 }
+
+function enablePreserved() {
+  if (!token) return;
+  $('preserved').href = `${base()}/preserved.pdf`; $('preserved').download = `page-${$('page').value}-preserved.pdf`;
+  $('preserved').classList.remove('disabled'); $('preserved').setAttribute('aria-disabled', 'false');
+}
+
+function syncControls() {
+  const cad = $('mode').value === 'cad_clean';
+  for (const id of ['denoise', 'sharpen', 'area']) $(id).closest('label').hidden = cad;
+  $('noise-strength').closest('label').hidden = !cad;
+}
+syncControls();

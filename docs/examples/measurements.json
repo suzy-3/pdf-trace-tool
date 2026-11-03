@@ -1,18 +1,20 @@
 [
   {
     "case": "640x500",
-    "seconds": 0.094,
-    "paths": 31,
-    "missing_pixels": 3448,
+    "seconds": 0.064,
+    "paths": 5,
+    "missing_pixels": 0,
     "added_pixels": 0,
-    "process_peak_rss_mib": 161.8
+    "missing_ratio": 0.0,
+    "mean_width_error_px": 0.0
   },
   {
     "case": "2000x1500",
-    "seconds": 1.183,
-    "paths": 55,
-    "missing_pixels": 37630,
-    "added_pixels": 78,
-    "process_peak_rss_mib": 193.3
+    "seconds": 0.552,
+    "paths": 27,
+    "missing_pixels": 0,
+    "added_pixels": 0,
+    "missing_ratio": 0.0,
+    "mean_width_error_px": 0.0
   }
 ]

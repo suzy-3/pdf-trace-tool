@@ -1,0 +1,102 @@
+{
+  "after": {
+    "angle": 0.0,
+    "width": 1200,
+    "height": 900,
+    "paths": 0,
+    "protected_components": 0,
+    "foreground_pixels": 117514,
+    "wall_interior_pixels": 40543,
+    "tiles": 12,
+    "tile_size": 384,
+    "max_analysis_pixels": 302500,
+    "thinning_iterations": 0,
+    "engine": "hybrid_preserve",
+    "missing_pixels": 0,
+    "added_pixels": 0,
+    "quality_passed": true,
+    "review_required": true,
+    "fallback_ratio": 1.0,
+    "fallback_pixel_retention": 1.0,
+    "missing_ratio": 0.0,
+    "added_ratio": 0.0,
+    "local_connectivity_change": 0,
+    "mean_width_error_px": 0.0,
+    "max_line_position_error_px": 0.0,
+    "measured_line_widths_pt": [],
+    "noise_removed_pixels": 0,
+    "attempted_quality": {
+      "source_pixels": 112258,
+      "missing": 0,
+      "added": 0,
+      "connectivity_change": 0,
+      "width_error": 0.0
+    },
+    "seconds": 0.265,
+    "warning": "要確認：未認識の壁・文字・建具は原画を保持しています。完全なCAD化ではありません。"
+  },
+  "before": {
+    "source_pixels": 112258,
+    "missing": 101884,
+    "added": 2398,
+    "connectivity_change": 6,
+    "width_error": 1033032.5,
+    "passed": false
+  },
+  "regions": {
+    "wall": {
+      "source_pixels": 22097,
+      "missing": 0,
+      "added": 0,
+      "connectivity_change": 0,
+      "width_error": 0.0,
+      "passed": true,
+      "unchanged_pixel_ratio": 1.0
+    },
+    "junction": {
+      "source_pixels": 1904,
+      "missing": 0,
+      "added": 0,
+      "connectivity_change": 0,
+      "width_error": 0.0,
+      "passed": true,
+      "unchanged_pixel_ratio": 1.0
+    },
+    "bedroom_text": {
+      "source_pixels": 1499,
+      "missing": 0,
+      "added": 0,
+      "connectivity_change": 0,
+      "width_error": 0.0,
+      "passed": true,
+      "unchanged_pixel_ratio": 1.0
+    },
+    "kitchen_text": {
+      "source_pixels": 1111,
+      "missing": 0,
+      "added": 0,
+      "connectivity_change": 0,
+      "width_error": 0.0,
+      "passed": true,
+      "unchanged_pixel_ratio": 1.0
+    },
+    "dining_text": {
+      "source_pixels": 1354,
+      "missing": 0,
+      "added": 0,
+      "connectivity_change": 0,
+      "width_error": 0.0,
+      "passed": true,
+      "unchanged_pixel_ratio": 1.0
+    },
+    "door_arc": {
+      "source_pixels": 1098,
+      "missing": 0,
+      "added": 0,
+      "connectivity_change": 0,
+      "width_error": 0.0,
+      "passed": true,
+      "unchanged_pixel_ratio": 1.0
+    }
+  }
+}
