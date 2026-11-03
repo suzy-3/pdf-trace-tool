@@ -1,0 +1,12 @@
+<!doctype html>
+<html lang="ja">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PDFトレースツール</title><link rel="stylesheet" href="/static/style.css"></head>
+<body>
+<header><span class="logo">▧</span><div><h1>PDFトレースツール</h1><p>スキャン図面を、くっきりした線へ。</p></div></header>
+<main>
+<section class="panel"><h2>1. 図面を開く</h2><label class="upload">スキャンPDFを選択<input id="file" type="file" accept="application/pdf,.pdf"></label><p class="hint">20MB以下・最大100ページ。図面は一時保存され、1時間後または「図面を閉じる」で削除されます。</p><button id="close" disabled>図面を閉じる</button></section>
+<section class="panel"><h2>2. ページを補正する</h2><div class="controls"><label>ページ <select id="page" disabled></select></label><label><input id="deskew" type="checkbox" checked> 傾き自動補正</label><label><input id="denoise" type="checkbox" checked> ノイズ除去</label><label><input id="sharpen" type="checkbox" checked> 線の鮮明化</label><label>除去する微小領域 <input id="area" type="number" min="1" max="200" value="6"> px</label><button class="primary" id="process" disabled>補正・SVG変換</button></div><p class="hint">自動傾き補正は±15度まで。設定を変更したら再度変換してください。</p></section>
+<p id="status" role="status" aria-live="polite">PDFを選択すると図面が表示されます。</p>
+<section class="comparison"><article class="panel"><h2>元の図面</h2><div class="canvas"><img id="original" alt="アップロードした元図面" hidden><span id="empty-original">ここに元図面を表示します</span></div></article><article class="panel"><h2>補正後の図面</h2><div class="canvas"><img id="corrected" alt="補正後の図面" hidden><span id="empty-corrected">変換すると比較できます</span></div></article></section>
+<section class="panel"><h2>3. ダウンロード</h2><div class="controls"><a id="pdf" class="button disabled" aria-disabled="true">補正PDF</a><a id="svg" class="button disabled" aria-disabled="true">SVG</a></div><p class="hint">選択中の1ページを出力します。PDFは元のページ寸法を保持した画像PDF、SVGは黒線の輪郭です。文字認識やCADの中心線・寸法認識には対応していません。</p></section>
+</main><footer>PDF TRACE TOOL · FastAPI / OpenCV / PyMuPDF</footer><script src="/static/app.js"></script></body></html>
