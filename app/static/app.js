@@ -16,7 +16,9 @@ function resetOutput() {
   }
 }
 async function request(url, options) {
-  const response = await fetch(url, options);
+  let response;
+  try { response = await fetch(url, options); }
+  catch { throw new Error('通信が切れました。処理が継続している場合があります。再接続後に処理状況を確認してください。'); }
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
     throw new Error(typeof body.detail === 'string' ? body.detail : '処理に失敗しました。入力内容を確認してください。');
@@ -47,7 +49,17 @@ $('page').onchange = showPage;
 $('process').onclick = async () => {
   setBusy(true); resetOutput(); status('図面を補正して線を抽出しています…');
   try {
-    const data = await (await request(`${base()}/process`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({mode: $('mode').value, line_width: Number($('line-width').value), noise_strength: Number($('noise-strength').value), join_threshold: Number($('join-threshold').value), snap: $('snap').checked, fidelity: $('fidelity').value, deskew: $('deskew').checked, denoise: $('denoise').checked, sharpen: $('sharpen').checked, min_area: Number($('area').value)})})).json();
+    const jobBase = base();
+    let job = await (await request(`${jobBase}/jobs`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({mode: $('mode').value, line_width: Number($('line-width').value), noise_strength: Number($('noise-strength').value), join_threshold: Number($('join-threshold').value), snap: $('snap').checked, fidelity: $('fidelity').value, deskew: $('deskew').checked, denoise: $('denoise').checked, sharpen: $('sharpen').checked, min_area: Number($('area').value)})})).json();
+    $('progress').hidden = false;
+    while (job.state === 'running') {
+      $('progress').value = job.percent;
+      status(`${job.stage}: ${job.percent}% ／ 小領域 ${job.completed} / ${job.total}`);
+      await new Promise(resolve => setTimeout(resolve, 350));
+      job = await (await request(`${jobBase}/jobs/${job.id}`)).json();
+    }
+    if (job.state === 'failed') throw new Error(job.error);
+    const data = job.result;
     $('corrected').src = `${base()}/corrected.png?t=${Date.now()}`;
     $('corrected').hidden = false; $('empty-corrected').hidden = true;
     for (const [id, name] of [['pdf', 'corrected.pdf'], ['svg', 'trace.svg']]) {
@@ -63,7 +75,7 @@ $('process').onclick = async () => {
     }
     status(`変換しました。${data.warning || ''} ${data.seconds !== undefined ? `${data.seconds}秒 / 欠落候補 ${data.missing_pixels}px / 追加候補 ${data.added_pixels}px。` : ''}検出した傾き: ${data.angle}° ／ ${data.width} × ${data.height} px`);
   } catch (error) { status(error.message); }
-  finally { setBusy(false); }
+  finally { $('progress').hidden = true; setBusy(false); }
 };
 $('close').onclick = async () => {
   setBusy(true);

@@ -78,9 +78,36 @@ def main():
             page.locator('#close').click()
             expect(page.locator('#status')).to_contain_text('図面を削除しました')
             expect(page.locator('#process')).to_be_disabled()
+            # Dense architectural-like page: real background job and progress UI.
+            large = np.full((1600, 2400), 255, np.uint8)
+            for y in range(20, 1580, 35):
+                cv2.line(large, (15, y), (2385, y), 0, 5)
+            with pymupdf.open() as large_pdf:
+                p = large_pdf.new_page(width=1200, height=800)
+                p.insert_image(p.rect, stream=cv2.imencode('.png', large)[1].tobytes())
+                large_data = large_pdf.tobytes()
+            page.locator('#file').set_input_files({'name':'large.pdf', 'mimeType':'application/pdf', 'buffer':large_data})
+            expect(page.locator('#process')).to_be_enabled()
+            page.locator('#mode').select_option('cad_clean')
+            page.locator('#deskew').uncheck()
+            page.locator('#process').click()
+            expect(page.locator('#progress')).to_be_visible()
+            expect(page.locator('#status')).to_contain_text('小領域')
+            expect(page.locator('#status')).to_contain_text('変換しました', timeout=60000)
+            expect(page.locator('#progress')).to_be_hidden()
+            expect(page.locator('#svg')).to_have_attribute('aria-disabled', 'false')
+            # Transport/server rejection must be displayed in Japanese, no stale link.
+            page.route('**/jobs', lambda route: route.fulfill(status=503,
+                content_type='application/json', body='{"detail":"処理用メモリが不足しました。"}'))
+            page.locator('#process').click()
+            expect(page.locator('#status')).to_contain_text('処理用メモリが不足')
+            expect(page.locator('#svg')).not_to_have_attribute('href')
+            expect(page.locator('#progress')).to_be_hidden()
+            page.locator('#close').click()
+            expect(page.locator('#process')).to_be_disabled()
             assert not errors, errors
             browser.close()
-        print('Browser smoke passed: upload, page switch, process, comparison, PDF/SVG downloads, mobile layout, deletion')
+        print('Browser smoke passed: dense-plan progress, Japanese failure,  upload, page switch, process, comparison, PDF/SVG downloads, mobile layout, deletion')
     finally:
         server.terminate()
         server.wait(timeout=10)

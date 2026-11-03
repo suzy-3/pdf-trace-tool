@@ -78,7 +78,7 @@ def supported(points, ink):
     local = ink[y:bottom+1, x:right+1]
     canvas = np.zeros(local.shape, np.uint8)
     cv2.polylines(canvas, [points - (x, y)], False, 1, 1)
-    return not np.any((canvas != 0) & ~local)
+    return not np.any((canvas != 0) & ~local.astype(bool))
 
 
 def vector_svg(paths, width, height, stroke, protected=None):
@@ -93,93 +93,156 @@ def vector_svg(paths, width, height, stroke, protected=None):
 
 
 def cad_clean(gray, deskew=True, noise_strength=0, line_width=0.5,
-              join_threshold=0.1, snap=False, fidelity='faithful', scale=2.0):
+              join_threshold=0.1, snap=False, fidelity='faithful', scale=2.0,
+              progress=None, tile_size=None):
+    from .tiling import TILE_SIZE, MAX_PIXELS, Workspace, ThinningError
+    size = tile_size or TILE_SIZE
+    if size < 16 or size > TILE_SIZE:
+        raise CadLimitError('小領域のサイズが処理可能な範囲外です。')
     started = time.perf_counter()
-    # Parameters in PDF points: renderer is normally 2 px/pt, supplied by caller.
-    return _clean(gray, deskew, noise_strength, line_width, join_threshold, snap,
-                  fidelity, scale, started)
-
-
-def _clean(gray, deskew, noise_strength, line_width, join_threshold, snap,
-           fidelity, scale, started):
-    angle = skew_angle(gray) if deskew else 0.0
+    report = progress or (lambda *args: None)
+    report('傾き推定', 1, 0, 1)
+    if gray.size > MAX_PIXELS:
+        raise CadLimitError('処理画像が2000万画素を超えています。ページを分割してください。')
+    # Bound Hough workspace; rotation is still applied to the original raster.
+    ratio = min(1.0, 1600/max(gray.shape))
+    preview = cv2.resize(gray, None, fx=ratio, fy=ratio) if ratio < 1 else gray
+    angle = skew_angle(preview) if deskew else 0.0
     h, w = gray.shape
     if abs(angle) > 0.05:
-        matrix = cv2.getRotationMatrix2D((w / 2, h / 2), angle, 1)
-        c, s = abs(matrix[0, 0]), abs(matrix[0, 1])
-        nw, nh = int(np.ceil(w*c + h*s)), int(np.ceil(h*c + w*s))
+        matrix = cv2.getRotationMatrix2D((w/2, h/2), angle, 1)
+        c, si = abs(matrix[0, 0]), abs(matrix[0, 1])
+        nw, nh = int(np.ceil(w*c+h*si)), int(np.ceil(h*c+w*si))
+        if nw*nh > MAX_PIXELS:
+            raise CadLimitError('回転後の画像が2000万画素を超えます。傾き補正を無効にしてください。')
         matrix[:, 2] += ((nw-w)/2, (nh-h)/2)
         gray = cv2.warpAffine(gray, matrix, (nw, nh), borderValue=255)
-    h, w = gray.shape
-    if h*w > 3_000_000:
-        raise CadLimitError('回転後のCAD清書は300万画素以下です。ページを分割してください。')
-    # Closing estimates paper illumination without blurring foreground strokes.
-    kernel = max(3, int(round(12 * scale)) | 1)
-    paper = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, np.ones((kernel, kernel), np.uint8))
-    contrast = paper.astype(np.int16) - gray.astype(np.int16)
-    ink = contrast >= (6 if fidelity == 'faithful' else 10)
-    ink |= gray < 100  # keep large solid black regions
-    before = ink.copy()
-    if noise_strength:
-        count, labels, stats, _ = cv2.connectedComponentsWithStats(ink.astype(np.uint8))
-        # Never remove elongated small components; default removes nothing.
-        small = (stats[:, cv2.CC_STAT_AREA] <= noise_strength * scale**2)
-        small &= (stats[:, cv2.CC_STAT_WIDTH] <= 2*scale) & (stats[:, cv2.CC_STAT_HEIGHT] <= 2*scale)
-        small[0] = False
-        ink[small[labels]] = False
-    if int(ink.sum()) > 300_000:
-        raise CadLimitError('CAD清書は前景30万画素以下です。ページを分割してください。')
-    # Protect small components as original raster pixels: punctuation/glyphs must
-    # not be reshaped by thinning. This is geometric protection, not text OCR.
-    count, labels, stats, _ = cv2.connectedComponentsWithStats(ink.astype(np.uint8))
-    small = (stats[:, cv2.CC_STAT_HEIGHT] <= 12*scale)
-    small &= (stats[:, cv2.CC_STAT_WIDTH] <= 40*scale)
-    small[0] = False
-    protected_mask = small[labels] & ink
-    protected = np.zeros((h, w, 4), np.uint8)
-    protected[:, :, :3] = gray[:, :, None]
-    protected[:, :, 3] = protected_mask.astype(np.uint8)*255
-    skeleton = thin(ink & ~protected_mask)
-    paths = paths_from_skeleton(skeleton)
-    result = []
-    for path in paths:
-        points = np.asarray(path, np.int32)
-        # Short glyphs and curves remain unsmoothed in faithful mode.
-        if fidelity == 'clean' and len(points) >= 20*scale:
-            candidate = cv2.approxPolyDP(points.reshape(-1, 1, 2), min(join_threshold*scale, 0.75*scale), False).reshape(-1, 2)
-            if supported(candidate, ink):
-                points = candidate
-            if snap and len(points) == 2:
-                proposed = points.copy()
-                delta = np.abs(points[1]-points[0])
-                axis = int(np.argmin(delta))
-                if delta[axis] <= min(join_threshold*scale, 0.75*scale):
-                    proposed[:, axis] = round(float(points[:, axis].mean()))
-                    if supported(proposed, ink):
-                        points = proposed
-        # Exact collinear reduction changes no geometry, including short glyphs.
-        if len(points) > 2:
-            delta = np.diff(points, axis=0)
-            corners = np.any(delta[1:] != delta[:-1], axis=1)
-            points = points[np.r_[True, corners, True]]
-        result.append(points.tolist())
-    stroke = line_width * scale
-    svg = vector_svg(result, w, h, stroke, protected)
-    # Render the very same vector output used by PDF/SVG downloads.
+    try:
+        with Workspace() as workspace:
+            return _tiled_clean(gray, angle, noise_strength, line_width, join_threshold,
+                                snap, fidelity, scale, started, report, size, workspace)
+    except ThinningError as exc:
+        raise CadLimitError(str(exc)) from exc
+
+
+def _tiled_clean(gray, angle, noise_strength, line_width, join_threshold, snap,
+                 fidelity, scale, started, report, size, workspace):
+    import tempfile
     import pymupdf
+    from .tiling import tiles, window, tiled_thin, owned_paths, MAX_SVG_BYTES
+    h, w = gray.shape
+    boxes = list(tiles(gray.shape, size))
+    ink = workspace.array('ink', gray.shape)
+    before = workspace.array('before', gray.shape)
+    protected = workspace.array('protected', gray.shape)
+    kernel = max(3, int(round(12*scale)) | 1)
+    # Closing has support twice the kernel radius. Protection needs an entire
+    # small connected component even when a glyph straddles the core boundary.
+    halo = max(kernel+2, int(np.ceil(40*scale))+3)
+    protected_count = 0
+    foreground = 0
+    for index, box in enumerate(boxes):
+        region, core = window(gray.shape, box, halo)
+        local = gray[region]
+        paper = cv2.morphologyEx(local, cv2.MORPH_CLOSE, np.ones((kernel, kernel), np.uint8))
+        mask = (paper.astype(np.int16)-local.astype(np.int16) >= (6 if fidelity == 'faithful' else 10)) | (local < 100)
+        y, x, b, r = box
+        before[y:b, x:r] = mask[core]
+        _, labels, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8))
+        if noise_strength:
+            remove = (stats[:, cv2.CC_STAT_AREA] <= noise_strength*scale**2)
+            remove &= (stats[:, cv2.CC_STAT_WIDTH] <= 2*scale) & (stats[:, cv2.CC_STAT_HEIGHT] <= 2*scale)
+            remove[0] = False
+            mask[remove[labels]] = False
+            _, labels, stats, _ = cv2.connectedComponentsWithStats(mask.astype(np.uint8))
+        small = (stats[:, cv2.CC_STAT_HEIGHT] <= 12*scale) & (stats[:, cv2.CC_STAT_WIDTH] <= 40*scale)
+        small[0] = False
+        # A truncated component must never be mistaken for a small glyph.
+        if region[0].start > 0:
+            small[np.unique(labels[0])] = False
+        if region[0].stop < h:
+            small[np.unique(labels[-1])] = False
+        if region[1].start > 0:
+            small[np.unique(labels[:, 0])] = False
+        if region[1].stop < w:
+            small[np.unique(labels[:, -1])] = False
+        protected[y:b, x:r] = (small[labels] & mask)[core]
+        ink[y:b, x:r] = mask[core]
+        foreground += int(mask[core].sum())
+        top = stats[:, cv2.CC_STAT_TOP] + region[0].start
+        left = stats[:, cv2.CC_STAT_LEFT] + region[1].start
+        protected_count += int((small & (top >= y) & (top < b) & (left >= x) & (left < r)).sum())
+        report('前処理・文字保護', 2+18*(index+1)/len(boxes), index+1, len(boxes))
+    mask = workspace.array('mask', gray.shape)
+    for y, x, b, r in boxes:
+        mask[y:b, x:r] = ink[y:b, x:r] & (1-protected[y:b, x:r])
+    skeleton, iterations = tiled_thin(mask, workspace, report, size)
+    path_count = 0
+    # Spool vector text to disk: never retain a full-page Python graph/path list.
+    with tempfile.TemporaryFile() as paths, tempfile.TemporaryFile() as images:
+        for index, box in enumerate(boxes):
+            y, x, b, r = box
+            for path in owned_paths(skeleton, box, paths_from_skeleton):
+                points = np.asarray(path, np.int32)
+                if fidelity == 'clean' and len(points) >= 20*scale:
+                    candidate = cv2.approxPolyDP(points.reshape(-1, 1, 2), min(join_threshold*scale, .75*scale), False).reshape(-1, 2)
+                    if supported(candidate, ink):
+                        points = candidate
+                    # Snapping may not move seam/junction endpoints.
+                    if snap and len(points) == 2 and all(x+1 < px < r-2 and y+1 < py < b-2 for px, py in points):
+                        isolated = all(int(skeleton[py-1:py+2, px-1:px+2].sum()) <= 2 for px, py in points)
+                        proposed = points.copy()
+                        delta = np.abs(points[1]-points[0])
+                        axis = int(np.argmin(delta))
+                        if isolated and delta[axis] <= min(join_threshold*scale, .75*scale):
+                            proposed[:, axis] = round(float(points[:, axis].mean()))
+                            if supported(proposed, ink):
+                                points = proposed
+                if len(points) > 2:
+                    delta = np.diff(points, axis=0)
+                    points = points[np.r_[True, np.any(delta[1:] != delta[:-1], axis=1), True]]
+                paths.write(('M'+' L'.join(f'{px+.5:g},{py+.5:g}' for px, py in points)+' ').encode())
+                path_count += 1
+            if np.any(protected[y:b, x:r]):
+                rgba = np.zeros((b-y, r-x, 4), np.uint8)
+                rgba[:, :, :3] = gray[y:b, x:r, None]
+                rgba[:, :, 3] = protected[y:b, x:r]*255
+                encoded = base64.b64encode(png(rgba)).decode('ascii')
+                images.write(f'<image x="{x}" y="{y}" width="{r-x}" height="{b-y}" href="data:image/png;base64,{encoded}"/>'.encode())
+            if paths.tell()+images.tell() > MAX_SVG_BYTES:
+                raise CadLimitError('線や画像が複雑すぎて出力が64MBを超えます。ノイズ除去を調整してください。')
+            report('中心線の統合', 60+25*(index+1)/len(boxes), index+1, len(boxes))
+        paths.seek(0)
+        images.seek(0)
+        svg = (f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}"><path fill="none" stroke="black" stroke-width="{line_width*scale:.3f}" stroke-linecap="round" stroke-linejoin="round" d="'.encode()
+               + paths.read() + b'"/>' + images.read() + b'</svg>')
+    report('SVG描画', 86, 0, 1)
     with pymupdf.open(stream=svg, filetype='svg') as doc:
         pix = doc[0].get_pixmap(colorspace=pymupdf.csGRAY, alpha=False)
-        rendered = np.frombuffer(pix.samples, np.uint8).reshape(pix.height, pix.width).copy()
-    out_ink = rendered < 240
-    tolerance = cv2.dilate(ink.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
-    removed = before & ~cv2.dilate(out_ink.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
-    added = out_ink & ~tolerance
-    diff = np.full((h, w, 3), 255, np.uint8)
-    diff[before] = (150, 150, 150)
-    diff[removed] = (0, 0, 220)  # red: source ink distant from output
-    diff[added] = (220, 0, 0)    # blue: output distant from source
-    return dict(png=png(rendered), svg=svg, reference=png(gray), difference=png(diff),
-                angle=angle, width=w, height=h, paths=len(result), protected_components=int(small.sum()),
-                missing_pixels=int(removed.sum()), added_pixels=int(added.sum()),
-                seconds=round(time.perf_counter()-started, 3),
-                warning='赤は原画から離れた欠落候補、青は追加候補です。文字・太線も必ず原画と比較してください。')
+        rendered = np.frombuffer(pix.samples, np.uint8).reshape(pix.height, pix.width)
+    diff = workspace.array('diff', (h, w, 3))
+    missing = added = 0
+    for index, box in enumerate(boxes):
+        region, core = window(gray.shape, box, 1)
+        y, x, b, r = box
+        out = rendered[region] < 240
+        tolerance = cv2.dilate(ink[region], np.ones((3, 3), np.uint8)).astype(bool)
+        removed = before[y:b, x:r].astype(bool) & ~cv2.dilate(out.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)[core]
+        extra = out[core] & ~tolerance[core]
+        canvas = np.full((b-y, r-x, 3), 255, np.uint8)
+        canvas[before[y:b, x:r].astype(bool)] = (150, 150, 150)
+        canvas[removed] = (0, 0, 220)
+        canvas[extra] = (220, 0, 0)
+        diff[y:b, x:r] = canvas
+        missing += int(removed.sum())
+        added += int(extra.sum())
+        report('差分確認', 87+9*(index+1)/len(boxes), index+1, len(boxes))
+    report('出力を保存', 97, 0, 1)
+    output = dict(png=png(rendered), svg=svg, reference=png(gray), difference=png(diff),
+                  angle=angle, width=w, height=h, paths=path_count, protected_components=protected_count,
+                  missing_pixels=missing, added_pixels=added, foreground_pixels=foreground,
+                  tiles=len(boxes), tile_size=size, thinning_iterations=iterations,
+                  seconds=round(time.perf_counter()-started, 3),
+                  warning='赤は欠落候補、青は追加候補です。文字・寸法線を原画と比較してください。')
+    report('完了', 100, len(boxes), len(boxes))
+    return output
